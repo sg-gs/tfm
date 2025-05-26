@@ -53,73 +53,79 @@ class StokesGAN:
         
         # Criterio para discriminador
         self.adversarial_loss = nn.BCELoss()
-    
+
     def train_step(self, lr_stokes, hr_stokes):
-        """Un paso de entrenamiento"""
+        """Versión gradual para integrar pérdidas físicas"""
         batch_size = lr_stokes.size(0)
-        
-        # Labels para entrenamiento adversarial
-        real_label = torch.ones(batch_size, 1, device=self.device)
-        fake_label = torch.zeros(batch_size, 1, device=self.device)
         
         # ==================
         # Entrenar Discriminador
         # ==================
         self.opt_d.zero_grad()
-        
-        # Generar imágenes falsas
         with torch.no_grad():
-            fake_hr = self.generator(lr_stokes)
+            fake_hr_for_d = self.generator(lr_stokes)
         
-        # Discriminador en imágenes reales
         real_pred = self.discriminator(lr_stokes, hr_stokes)
-        real_pred_resized = F.adaptive_avg_pool2d(real_pred, (1, 1)).view(batch_size, -1)
-        d_real_loss = self.adversarial_loss(real_pred_resized, real_label)
+        fake_pred_for_d = self.discriminator(lr_stokes, fake_hr_for_d)
         
-        # Discriminador en imágenes falsas
-        fake_pred = self.discriminator(lr_stokes, fake_hr)
-        fake_pred_resized = F.adaptive_avg_pool2d(fake_pred, (1, 1)).view(batch_size, -1)
-        d_fake_loss = self.adversarial_loss(fake_pred_resized, fake_label)
-        
-        d_loss = (d_real_loss + d_fake_loss) * 0.5
+        d_loss = torch.mean((real_pred - 1)**2) + torch.mean(fake_pred_for_d**2)
         d_loss.backward()
         self.opt_d.step()
         
         # ==================
-        # Entrenar Generador
+        # Entrenar Generador - AÑADIR PÉRDIDAS GRADUALMENTE
         # ==================
         self.opt_g.zero_grad()
         
-        # Generar imágenes
         fake_hr = self.generator(lr_stokes)
         
-        # Pérdida del discriminador para el generador
+        # PASO 1: Solo pérdida pixel (ya sabemos que funciona)
+        pixel_loss = self.criterion.l1_loss(fake_hr, hr_stokes)
+        
+        # PASO 2: Añadir pérdida adversarial
         fake_pred = self.discriminator(lr_stokes, fake_hr)
         fake_pred_resized = F.adaptive_avg_pool2d(fake_pred, (1, 1)).view(batch_size, -1)
+        adv_loss = torch.mean((fake_pred_resized - 1)**2)  # Simplificado
         
-        # Pérdida total del generador
-        g_loss, loss_dict = self.criterion(fake_hr, hr_stokes, fake_pred_resized)
-
-        print(f"  📊 Desglose de pérdidas:")
-        for key, value in loss_dict.items():
-            print(f"     {key}: {value:.2e}")
+        # PASO 3: Añadir pérdidas físicas UNA POR UNA
+        stokes_loss = self.criterion.stokes_consistency_loss(fake_hr, hr_stokes)
+        polarization_loss = self.criterion.sun_polarization_loss(fake_hr)
+        
+        # PÉRDIDA TOTAL - Empezar con pesos muy pequeños
+        total_loss = (
+            1.0 * pixel_loss +           # Peso normal
+            0.1 * adv_loss +             # Peso pequeño
+            0.01 * stokes_loss +         # Peso muy pequeño
+            0.01 * polarization_loss     # Peso muy pequeño
+        )
+        
+        # DIAGNÓSTICO
+        print(f"  📊 Pérdidas individuales:")
+        print(f"     pixel: {pixel_loss.item():.6f}")
+        print(f"     adversarial: {adv_loss.item():.6f}")
+        print(f"     stokes: {stokes_loss.item():.6f}")
+        print(f"     polarization: {polarization_loss.item():.6f}")
+        print(f"     TOTAL: {total_loss.item():.6f}")
+        
+        total_loss.backward()
         
         # Verificar gradientes
         max_grad = 0
         for param in self.generator.parameters():
             if param.grad is not None:
                 max_grad = max(max_grad, param.grad.abs().max().item())
-        print(f"  🔥 Gradiente máximo: {max_grad:.2e}")
-
-        print(f"  📊 Rangos de datos:")
-        print(f"     pred_I: [{fake_hr[:, 0].min():.3f}, {fake_hr[:, 0].max():.3f}]")
-        print(f"     target_I: [{hr_stokes[:, 0].min():.3f}, {hr_stokes[:, 0].max():.3f}]")
-
-        g_loss.backward()
+        print(f"  🔥 Gradiente máximo: {max_grad:.6f}")
+        
         self.opt_g.step()
         
         return {
-            'g_loss': g_loss.item(),
+            'g_loss': total_loss.item(),
             'd_loss': d_loss.item(),
-            **loss_dict
+            'pixel': pixel_loss.item(),
+            'stokes': stokes_loss.item(),
+            'polarization': polarization_loss.item(),
+            'adversarial': adv_loss.item(),
+            'magnetic': 0,
+            'poisson': 0,
+            'spatial': 0
         }

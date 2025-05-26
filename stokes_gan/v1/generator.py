@@ -196,4 +196,10 @@ class StokesUNetGenerator(nn.Module):
         x = self.final_conv(x)
         # print(f"✅ FORWARD COMPLETE - Output: {x.shape}")
         
+        # I (canal 0) debe ser positivo
+        x[:, 0] = torch.sigmoid(x[:, 0])  # I ∈ [0,1]
+        
+        # Q, U, V (canales 1,2,3) pueden ser negativos pero limitados
+        x[:, 1:] = torch.tanh(x[:, 1:]) * 0.1  # Q,U,V ∈ [-0.1, 0.1]
+        
         return x
