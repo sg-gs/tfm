@@ -3,6 +3,7 @@
 Pix2Pix Denoising MEJORADO - Con evaluación completa como Self2Self
 """
 
+import traceback
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,8 +32,8 @@ CONFIG = {
     'learning_rate_d': 5e-5,
     'lambda_l1': 200.0,
     'lambda_adv': 0.5,
-    'lambda_self2self': 100.0,    # NUEVO: peso para pérdida Self2Self
-    'bernoulli_prob': 0.3,         # NUEVO: probabilidad enmascaramiento
+    'lambda_self2self': 100.0,
+    'bernoulli_prob': 0.3,
     'image_size': 256,
     'noise_level': 0.02,
     'num_predictions': 10,
@@ -666,6 +667,7 @@ def train(fits_file):
 
 def save_self2self_training_example(generator, dataloader, save_dir, epoch):
     generator.eval()
+    metrics_calculated = None
     
     with torch.no_grad():
         for input_masked, target_original, mask in dataloader:
@@ -811,6 +813,13 @@ def main():
         print(f"No se encuentra {fits_file}")
         print("📝 Modifica la variable 'fits_file' para apuntar a tus datos FITS")
         return
+
+    learning_rates_g = [5e-5, 1e-4, 2e-4]
+    learning_rates_d = [2e-5, 5e-5, 1e-4]
+    epochs_list = [100, 150, 200]
+
+    exp_count = 0
+    total_experiments = len(learning_rates_g) * len(learning_rates_d) * len(epochs_list)
     
     try:
         if device.type == 'cuda':
@@ -818,8 +827,26 @@ def main():
             print(f"   - Memoria disponible: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
         else:
             print("⚠️ Usando CPU - considera usar GPU para mejor rendimiento")
-        
-        generator, discriminator, original, denoised = train(fits_file)
+
+        for lr_g in learning_rates_g:
+            for lr_d in learning_rates_d:
+                for epochs in epochs_list:
+                    exp_count += 1
+                    start_time = time.time()
+
+                    try:
+                        CONFIG['learning_rate_g'] = lr_g
+                        CONFIG['learning_rate_d'] = lr_d
+                        CONFIG['num_epochs'] = epochs
+                        print(f"Empieza entrenamiento {exp_count}/{total_experiments}, lr_g {lr_g}, lr_d {lr_d}, epochs {epochs}")
+
+                        generator, discriminator, original, denoised = train(fits_file)
+                        training_time = (time.time() - start_time) / 60
+                        print(f"Entrenamiento {exp_count}/{total_experiments} completado en {training_time:.1f} min")
+
+                    except Exception as e:
+                        print(f"Error: {e}")
+                        traceback.print_exc()
         
         print("Entrenamiento finalizado")
         
@@ -827,7 +854,6 @@ def main():
         
     except Exception as e:
         print(f"Error: {e}")
-        import traceback
         traceback.print_exc()
 
 if __name__ == "__main__":
