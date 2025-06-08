@@ -6,18 +6,21 @@ class SimpleDiscriminator(nn.Module):
         super(SimpleDiscriminator, self).__init__()
         
         self.model = nn.Sequential(
-            nn.Conv2d(8, 16, 4, stride=2, padding=1),  # Reducir de 32→16
+            nn.Conv2d(8, 32, 4, stride=2, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Dropout(0.3),  # Añadir dropout
+            nn.Dropout2d(0.25),
             
-            nn.Conv2d(16, 32, 4, stride=2, padding=1), # Reducir de 64→32
+            nn.Conv2d(32, 64, 4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2),
-            nn.Dropout(0.3),
+            nn.Dropout2d(0.3),
             
-            nn.Conv2d(32, 64, 4, stride=2, padding=1), # Reducir de 128→64
+            nn.Conv2d(64, 128, 4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2),
+            nn.Dropout2d(0.4),
             
-            nn.Conv2d(64, 1, 4, stride=1, padding=1)
+            nn.Conv2d(128, 1, 4, stride=1, padding=1)
         )
     
     def forward(self, noisy, clean):
