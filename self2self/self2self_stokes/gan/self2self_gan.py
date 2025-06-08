@@ -15,6 +15,8 @@ import time
 from tqdm import tqdm
 import os
 from datetime import datetime
+from generator import Self2SelfGenerator
+from discriminator import SimpleDiscriminator
 
 # Configuración GPU optimizada
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -35,120 +37,11 @@ CONFIG = {
     'save_interval': 15,
 }
 
-print(f"🎯 Pix2Pix Denoising MEJORADO")
 print(f"📊 Config: {CONFIG['num_epochs']} épocas, batch={CONFIG['batch_size']}, img={CONFIG['image_size']}")
-
-# =============================================================================
-# MODELOS (MANTENIDOS IGUALES)
-# =============================================================================
-
-class Self2SelfGenerator(nn.Module):    
-    def __init__(self):
-        super(Self2SelfGenerator, self).__init__()
-        
-        # Encoder
-        self.enc1 = nn.Sequential(
-            nn.Conv2d(4, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 32, 3, padding=1),
-            nn.ReLU()
-        )
-        self.pool1 = nn.MaxPool2d(2)
-        
-        self.enc2 = nn.Sequential(
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, padding=1),
-            nn.ReLU()
-        )
-        self.pool2 = nn.MaxPool2d(2)
-        
-        # Bottleneck
-        self.bottleneck = nn.Sequential(
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(128, 128, 3, padding=1),
-            nn.ReLU(),
-            nn.Dropout(0.3)
-        )
-        
-        # Decoder
-        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec2 = nn.Sequential(
-            nn.Conv2d(128 + 64, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, padding=1),
-            nn.ReLU()
-        )
-        
-        self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec1 = nn.Sequential(
-            nn.Conv2d(64 + 32, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 32, 3, padding=1),
-            nn.ReLU()
-        )
-        
-        # TU SALIDA EXACTA
-        self.final = nn.Conv2d(32, 4, 1)
-    
-    def forward(self, x):
-        # Encoder
-        e1 = self.enc1(x)
-        p1 = self.pool1(e1)
-        
-        e2 = self.enc2(p1)
-        p2 = self.pool2(e2)
-        
-        # Bottleneck
-        b = self.bottleneck(p2)
-        
-        # Decoder
-        u2 = self.up2(b)
-        d2 = self.dec2(torch.cat([u2, e2], 1))
-        
-        u1 = self.up1(d2)
-        d1 = self.dec1(torch.cat([u1, e1], 1))
-        
-        # Salida con restricciones Stokes
-        out = self.final(d1)
-        
-        I = torch.sigmoid(out[:, 0:1])
-        Q = torch.tanh(out[:, 1:2]) * 0.1
-        U = torch.tanh(out[:, 2:3]) * 0.1
-        V = torch.tanh(out[:, 3:4]) * 0.1
-        
-        return torch.cat([I, Q, U, V], dim=1)
-
-class SimpleDiscriminator(nn.Module):
-    """Discriminador simplificado"""
-    
-    def __init__(self):
-        super(SimpleDiscriminator, self).__init__()
-        
-        self.model = nn.Sequential(
-            nn.Conv2d(8, 16, 4, stride=2, padding=1),  # Reducir de 32→16
-            nn.LeakyReLU(0.2),
-            nn.Dropout(0.3),  # Añadir dropout
-            
-            nn.Conv2d(16, 32, 4, stride=2, padding=1), # Reducir de 64→32
-            nn.LeakyReLU(0.2),
-            nn.Dropout(0.3),
-            
-            nn.Conv2d(32, 64, 4, stride=2, padding=1), # Reducir de 128→64
-            nn.LeakyReLU(0.2),
-            
-            nn.Conv2d(64, 1, 4, stride=1, padding=1)
-        )
-    
-    def forward(self, noisy, clean):
-        x = torch.cat([noisy, clean], 1)
-        return torch.sigmoid(self.model(x))
 
 # =============================================================================
 # DATASET MEJORADO PARA EVALUACIÓN
 # =============================================================================
-
 class Self2SelfDataset(Dataset):    
     def __init__(self, fits_file, num_patches=1000, patch_size=128, bernoulli_prob=0.3):
         print(f"📥 Cargando {fits_file}...")
