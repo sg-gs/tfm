@@ -17,9 +17,11 @@ import os
 from datetime import datetime
 from generator import Self2SelfGenerator
 from discriminator import SimpleDiscriminator
+from logger import Logger 
 
 # Configuración GPU optimizada
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+logger = Logger("self2self_gan_v1")
 print(f"🔧 Dispositivo: {device}")
 
 CONFIG = {
@@ -404,7 +406,14 @@ def train(fits_file):
     opt_g = optim.Adam(generator.parameters(), lr=CONFIG['learning_rate_g'])
     opt_d = optim.Adam(discriminator.parameters(), lr=CONFIG['learning_rate_d'])
 
-    criterion_bce = nn.BCELoss()
+    logger.save_config(
+        config_dict=CONFIG,
+        model_info={
+            'generator_params': sum(p.numel() for p in generator.parameters()),
+            'discriminator_params': sum(p.numel() for p in discriminator.parameters()),
+            'architecture': 'Self2Self + GAN'
+        }
+    )
 
     scheduler_g = optim.lr_scheduler.ReduceLROnPlateau(
         opt_g, mode='min', factor=0.5, patience=20,
@@ -536,6 +545,14 @@ def train(fits_file):
             'adv_loss': avg_adv_loss,
             'l1_loss': avg_l1_loss
         })
+
+        logger.log_epoch(
+            epoch=epoch+1,
+            losses=train_losses[-1],
+            lr_g=opt_g.param_groups[0]['lr'],
+            lr_d=opt_d.param_groups[0]['lr'],
+            epoch_time=epoch_time
+        )
         
         print(f"\n📊 Época {epoch+1:03d} completada en {epoch_time:.1f}s")
         print(f"   🔸 G_Loss: {avg_g_loss:.6f}")
@@ -558,7 +575,7 @@ def train(fits_file):
             except Exception as e:
                 print(f"   ⚠️ Error guardando ejemplo: {e}")
         
-        # Checkpoint (igual que Pix2Pix)
+        # Checkpoint
         if (epoch + 1) % CONFIG['save_interval'] == 0:
             torch.save({
                 'generator': generator.state_dict(),
@@ -574,7 +591,7 @@ def train(fits_file):
     print(f"📁 Checkpoints en: {checkpoint_dir}")
     
     # =================================================================
-    # EVALUACIÓN COMPLETA (IGUAL QUE PIX2PIX)
+    # EVALUACIÓN COMPLETA
     # =================================================================
     
     print(f"\n{'='*60}")
@@ -597,13 +614,15 @@ def train(fits_file):
     # Desnormalizar resultados
     original_final = desnormalize_stokes(original_normalized, I_min, I_max)
     denoised_final = desnormalize_stokes(denoised_normalized, I_min, I_max)
+
+    logger.log_evaluation(CONFIG['num_epochs'], original_final, denoised_final)
     
-    # Validación física (igual que Pix2Pix)
+    # Validación física
     physics_ok = validate_stokes_physics_post_denoising(denoised_final)
     if not physics_ok:
         print("⚠️ Advertencia: Problemas de cumplimiento físico detectados")
     
-    # Guardar resultado en FITS (igual que Pix2Pix)
+    # Guardar resultado en FITS
     print("\n💾 Guardando resultado...")
     denoised_fits_format = np.transpose(denoised_final, (2, 0, 1))
     
@@ -613,11 +632,11 @@ def train(fits_file):
     hdu.writeto('self2self_gan_denoised.fits', overwrite=True)
     print("✅ Resultado guardado: self2self_gan_denoised.fits")
     
-    # Crear visualización (igual que Pix2Pix)
+    # Crear visualización
     print("\n📊 Creando visualización...")
     create_comparison_self2self(original_final, denoised_final)
     
-    # Estadísticas finales (igual formato que Pix2Pix)
+    # Estadísticas finales
     print_stokes_statistics(original_final, denoised_final)
     
     # Estadísticas adicionales del entrenamiento
@@ -631,7 +650,7 @@ def train(fits_file):
     print(f"✅ Adversarial final: {final_losses['adv_loss']:.6f}")
     print(f"✅ L1 final: {final_losses['l1_loss']:.6f}")
     
-    # Métricas de convergencia (como en Pix2Pix)
+    # Métricas de convergencia
     if len(train_losses) > 10:
         recent_g_losses = [l['g_loss'] for l in train_losses[-10:]]
         g_loss_std = np.std(recent_g_losses)
@@ -655,6 +674,14 @@ def save_self2self_training_example(generator, dataloader, save_dir, epoch):
             
             # Generar reconstrucción
             denoised_batch = generator(input_masked)
+
+            if logger and not metrics_calculated:
+                # Usar primer elemento del batch para métricas
+                target_np = target_original[0].cpu().numpy().transpose(1, 2, 0)  # (H,W,C)
+                denoised_np = denoised_batch[0].cpu().numpy().transpose(1, 2, 0)
+
+                # Logs en evaluación
+                metrics, compliance = logger.log_evaluation(epoch, target_np, denoised_np)
             
             # Usar primer elemento del batch
             input_imgs = input_masked[0].cpu().numpy()
@@ -698,7 +725,7 @@ def save_self2self_training_example(generator, dataloader, save_dir, epoch):
     generator.train()
 
 def denoise_full_image_self2self(generator, image, config):
-    """Aplicar denoising Self2Self con ensemble (como en tu Pix2Pix)"""
+    """Aplicar denoising Self2Self con ensemble"""
     
     print(f"\n🧠 Aplicando Self2Self-GAN denoising...")
     print(f"   - Imagen: {image.shape}")
@@ -777,10 +804,6 @@ def create_comparison_self2self(original, denoised, save_path='self2self_gan_com
     print(f"📊 Comparación guardada: {save_path}")
 
 
-# =============================================================================
-# FUNCIÓN PRINCIPAL MEJORADA
-# =============================================================================
-
 def main():
     fits_file = '../data.fits'
     
@@ -803,7 +826,7 @@ def main():
         return generator, discriminator, original, denoised
         
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
         import traceback
         traceback.print_exc()
 
