@@ -5,6 +5,7 @@ from datetime import datetime
 import torch
 from skimage.metrics import structural_similarity as ssim
 import pandas as pd
+import numpy as np
 
 class Logger:
     def __init__(self, experiment_name, save_dir="results"):
