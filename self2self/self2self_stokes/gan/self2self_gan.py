@@ -624,18 +624,18 @@ def train(fits_file):
         print("⚠️ Advertencia: Problemas de cumplimiento físico detectados")
     
     # Guardar resultado en FITS
-    print("\n💾 Guardando resultado...")
-    denoised_fits_format = np.transpose(denoised_final, (2, 0, 1))
+    # print("\n💾 Guardando resultado...")
+    # denoised_fits_format = np.transpose(denoised_final, (2, 0, 1))
     
-    hdu = fits.PrimaryHDU(denoised_fits_format.astype(np.float32))
-    if header:
-        hdu.header.update(header)
-    hdu.writeto('self2self_gan_denoised.fits', overwrite=True)
-    print("✅ Resultado guardado: self2self_gan_denoised.fits")
+    # hdu = fits.PrimaryHDU(denoised_fits_format.astype(np.float32))
+    # if header:
+    #     hdu.header.update(header)
+    # hdu.writeto('self2self_gan_denoised.fits', overwrite=True)
+    # print("✅ Resultado guardado: self2self_gan_denoised.fits")
     
     # Crear visualización
-    print("\n📊 Creando visualización...")
-    create_comparison_self2self(original_final, denoised_final)
+    # print("\n📊 Creando visualización...")
+    # create_comparison_self2self(original_final, denoised_final)
     
     # Estadísticas finales
     print_stokes_statistics(original_final, denoised_final)
@@ -656,12 +656,6 @@ def train(fits_file):
         recent_g_losses = [l['g_loss'] for l in train_losses[-10:]]
         g_loss_std = np.std(recent_g_losses)
         print(f"✅ Estabilidad G_Loss (últimas 10 épocas): {g_loss_std:.6f}")
-    
-    print(f"\n🎉 PROCESO SELF2SELF-GAN COMPLETADO!")
-    print("📁 Archivos generados:")
-    print(f"   - {checkpoint_dir}/ (modelos entrenados)")
-    print("   - self2self_gan_denoised.fits (cubo Stokes denoised)")
-    print("   - self2self_gan_comparison.png (comparación)")
     
     return generator, discriminator, original_final, denoised_final
 
@@ -842,6 +836,18 @@ def main():
 
                         generator, discriminator, original, denoised = train(fits_file)
                         training_time = (time.time() - start_time) / 60
+
+                        suffix = f"_exp{exp_count}_lrg{lr_g:.0e}_lrd{lr_d:.0e}_ep{epochs}"
+                        
+                        # Guardar FITS con nombre único
+                        fits_name = f'self2self_gan_denoised{suffix}.fits'
+                        denoised_fits_format = np.transpose(denoised, (2, 0, 1))
+                        hdu = fits.PrimaryHDU(denoised_fits_format.astype(np.float32))
+                        hdu.writeto(fits_name, overwrite=True)
+                        print(f"FITS guardado: {fits_name}")
+                        comparison_name = f'self2self_gan_comparison{suffix}.png'
+                        create_comparison_self2self(original, denoised, comparison_name)
+
                         print(f"Entrenamiento {exp_count}/{total_experiments} completado en {training_time:.1f} min")
 
                     except Exception as e:
