@@ -401,7 +401,7 @@ def train(fits_file):
     print(f"📊 Train: {len(train_loader)} batches, Val: {len(val_loader)} batches")
     
     generator = Pix2PixGenerator().to(device)
-    discriminator = Pix2PixDiscriminator().to(device)
+    discriminator = Pix2PixDiscriminator(ndf=32).to(device)
     
     opt_g = optim.Adam(generator.parameters(), lr=CONFIG['learning_rate_g'])
     opt_d = optim.Adam(discriminator.parameters(), lr=CONFIG['learning_rate_d'])
