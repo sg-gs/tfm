@@ -22,7 +22,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reducir logs
 # CONFIGURACIÓN
 # =============================================================================
 
-IMAGE_PATH = "../data.fits"  # ← CAMBIAR AQUÍ
+IMAGE_PATH = "../data.fits"
 
 CONFIG = {
     'num_epochs': 100,
@@ -84,7 +84,9 @@ def create_self2self_model(input_shape=(128, 128, 1), dropout_rate=0.3):
     conv7 = layers.Conv2D(32, 3, activation='relu', padding='same')(conv7)
     
     # Salida
-    outputs = layers.Conv2D(1, 1, activation='sigmoid')(conv7)
+    raw_outputs = layers.Conv2D(4, 1, activation='linear')(conv7)
+
+    outputs = StokesConstraintLayer()(raw_outputs)
     
     model = keras.Model(inputs=inputs, outputs=outputs)
     
@@ -92,25 +94,57 @@ def create_self2self_model(input_shape=(128, 128, 1), dropout_rate=0.3):
 
 
 # =============================================================================
+# RESTRICCIONES DE STOKES
+# =============================================================================
+class StokesConstraintLayer(layers.Layer):
+    """
+    Capa que aplica restricciones físicas de Stokes
+    """
+    def call(self, inputs):
+        # Separar parámetros
+        I = tf.nn.sigmoid(inputs[..., 0:1])  # I siempre positivo
+        Q = tf.nn.tanh(inputs[..., 1:2])     # Q puede ser negativo
+        U = tf.nn.tanh(inputs[..., 2:3])     # U puede ser negativo  
+        V = tf.nn.tanh(inputs[..., 3:4])     # V puede ser negativo
+        
+        # Normalizar Q, U, V para cumplir restricción
+        pol_magnitude = tf.sqrt(Q**2 + U**2 + V**2)
+        scale_factor = tf.minimum(1.0, I / (pol_magnitude + 1e-8))
+        
+        Q_constrained = Q * scale_factor
+        U_constrained = U * scale_factor
+        V_constrained = V * scale_factor
+        
+        return tf.concat([I, Q_constrained, U_constrained, V_constrained], axis=-1)
+
+# =============================================================================
 # GENERADOR DE DATOS PARA SELF2SELF
 # =============================================================================
 
-class FIPSDataGenerator(keras.utils.Sequence):
+class StokesDataGenerator(keras.utils.Sequence):
     """
-    Generador de datos para Self2Self training
+    Generador de datos para Self2Self con parámetros de Stokes
     """
     
-    def __init__(self, image, patch_size=128, batch_size=16, patches_per_epoch=1000):
-        self.image = image
+    def __init__(self, stokes_cube, patch_size=128, batch_size=16, patches_per_epoch=1000):
+        # stokes_cube debe tener forma [H, W, 4] donde la última dimensión es [I, Q, U, V]
+        self.stokes_cube = stokes_cube
         self.patch_size = patch_size
         self.batch_size = batch_size
         self.patches_per_epoch = patches_per_epoch
         
+        # Validar que tenemos los 4 parámetros de Stokes
+        assert stokes_cube.shape[-1] == 4, "Se esperan 4 parámetros de Stokes [I, Q, U, V]"
+        
+        # Validar restricciones físicas en los datos originales
+        self._validate_stokes_physics()
+
     def __len__(self):
+        """Número de batches por época"""
         return self.patches_per_epoch // self.batch_size
-    
+
     def __getitem__(self, idx):
-        # Generar batch de patches
+        """Generar un batch de patches de Stokes"""
         batch_x = []
         batch_y = []
         
@@ -123,31 +157,180 @@ class FIPSDataGenerator(keras.utils.Sequence):
         
         return np.array(batch_x), np.array(batch_y)
     
+    def _validate_stokes_physics(self):
+        """Verificar restricciones físicas de Stokes en los datos"""
+        I = self.stokes_cube[..., 0]
+        Q = self.stokes_cube[..., 1]
+        U = self.stokes_cube[..., 2]
+        V = self.stokes_cube[..., 3]
+        
+        pol_intensity = np.sqrt(Q**2 + U**2 + V**2)
+        violations = np.sum(pol_intensity > I * 1.001)  # Tolerancia pequeña para errores numéricos
+        
+        if violations > 0:
+            print(f"⚠️ Advertencia: {violations} píxeles violan restricciones de Stokes")
+            # Opcionalmente, corregir automáticamente
+            self._correct_stokes_violations()
+    
+    def _correct_stokes_violations(self):
+        """Corregir violaciones de restricciones de Stokes"""
+        I = self.stokes_cube[..., 0]
+        Q = self.stokes_cube[..., 1]
+        U = self.stokes_cube[..., 2]
+        V = self.stokes_cube[..., 3]
+        
+        pol_intensity = np.sqrt(Q**2 + U**2 + V**2)
+        
+        # Encontrar píxeles que violan la restricción
+        violation_mask = pol_intensity > I
+        
+        if np.any(violation_mask):
+            # Escalar Q, U, V para que cumplan la restricción
+            scale_factor = np.ones_like(pol_intensity)
+            scale_factor[violation_mask] = (I[violation_mask] * 0.99) / pol_intensity[violation_mask]
+            
+            self.stokes_cube[..., 1] *= scale_factor
+            self.stokes_cube[..., 2] *= scale_factor
+            self.stokes_cube[..., 3] *= scale_factor
+            
+            print(f"✅ Corregidas {np.sum(violation_mask)} violaciones de Stokes")
+    
     def _get_random_patch(self):
-        """Extraer patch aleatorio"""
-        h, w = self.image.shape
+        """
+        Extraer patch aleatorio manteniendo coherencia de Stokes
+        Retorna patch con forma [patch_size, patch_size, 4]
+        """
+        h, w, channels = self.stokes_cube.shape
         
         if h >= self.patch_size and w >= self.patch_size:
+            # Imagen suficientemente grande - extraer patch aleatorio
             y = random.randint(0, h - self.patch_size)
             x = random.randint(0, w - self.patch_size)
-            patch = self.image[y:y+self.patch_size, x:x+self.patch_size].copy()
+            
+            # Extraer todos los canales de Stokes simultáneamente
+            patch = self.stokes_cube[y:y+self.patch_size, x:x+self.patch_size, :].copy()
+            
         else:
-            patch = self.image.copy()
+            # Imagen pequeña - usar padding
+            patch = self.stokes_cube.copy()
+            
             if patch.shape[0] < self.patch_size or patch.shape[1] < self.patch_size:
                 pad_h = max(0, self.patch_size - patch.shape[0])
                 pad_w = max(0, self.patch_size - patch.shape[1])
-                patch = np.pad(patch, ((0, pad_h), (0, pad_w)), mode='reflect')
+                
+                # Aplicar padding a todos los canales manteniendo correlaciones
+                patch = np.pad(patch, 
+                             ((0, pad_h), (0, pad_w), (0, 0)), 
+                             mode='reflect')
+                
+            patch = patch[:self.patch_size, :self.patch_size, :]
         
-        # Augmentaciones
-        if random.random() > 0.5:
-            patch = np.fliplr(patch).copy()
-        if random.random() > 0.5:
-            patch = np.flipud(patch).copy()
-        
-        # Añadir dimensión de canal
-        patch = np.expand_dims(patch, axis=-1)
+        # Aplicar augmentaciones manteniendo coherencia física
+        patch = self._apply_stokes_augmentations(patch)
         
         return patch
+    
+    def _apply_stokes_augmentations(self, patch):
+        """
+        Aplicar augmentaciones respetando las propiedades físicas de Stokes
+        """
+        # Flip horizontal - afecta la polarización lineal
+        if random.random() > 0.5:
+            patch = np.fliplr(patch).copy()
+            # Para flip horizontal: I y V no cambian, Q cambia signo, U no cambia
+            patch[..., 1] *= -1  # Q cambia signo
+        
+        # Flip vertical - afecta la polarización lineal
+        if random.random() > 0.5:
+            patch = np.flipud(patch).copy()
+            # Para flip vertical: I y V no cambian, Q no cambia, U cambia signo
+            patch[..., 2] *= -1  # U cambia signo
+        
+        # Rotación de 90 grados - intercambia Q y U con signos apropiados
+        if random.random() > 0.25:  # 25% probabilidad de rotación
+            num_rotations = random.randint(1, 3)
+            patch = np.rot90(patch, k=num_rotations, axes=(0, 1)).copy()
+            
+            # Para cada rotación de 90°:
+            # I y V no cambian
+            # Q y U se transforman según matriz de rotación de polarización
+            for _ in range(num_rotations):
+                Q_old = patch[..., 1].copy()
+                U_old = patch[..., 2].copy()
+                patch[..., 1] = -U_old  # Nuevo Q = -U_viejo
+                patch[..., 2] = Q_old   # Nuevo U = Q_viejo
+        
+        # Verificar que las augmentaciones no rompan restricciones físicas
+        self._verify_patch_physics(patch)
+        
+        return patch
+    
+    def _verify_patch_physics(self, patch):
+        """Verificar que el patch mantiene restricciones físicas"""
+        I = patch[..., 0]
+        Q = patch[..., 1]
+        U = patch[..., 2]
+        V = patch[..., 3]
+        
+        pol_intensity = np.sqrt(Q**2 + U**2 + V**2)
+        violations = np.sum(pol_intensity > I * 1.001)
+        
+        if violations > 0:
+            print(f"⚠️ Patch con {violations} violaciones después de augmentación")
+
+def stokes_combined_loss(y_true, y_pred):
+    """
+    Función de pérdida combinada para parámetros de Stokes
+    """
+    # Pérdida MSE estándar
+    mse_loss = tf.reduce_mean(tf.square(y_true - y_pred))
+    
+    # Pérdida por violación de restricciones físicas
+    physics_loss = stokes_physics_loss(y_true, y_pred)
+    
+    # Pérdida de suavidad espacial para coherencia
+    smoothness_loss = stokes_spatial_smoothness_loss(y_pred)
+    
+    # Combinar pérdidas con pesos
+    total_loss = mse_loss + 0.1 * physics_loss + 0.05 * smoothness_loss
+    
+    return total_loss
+
+def stokes_physics_loss(y_true, y_pred):
+    """Pérdida por violación de restricciones físicas de Stokes"""
+    
+    I_pred = y_pred[..., 0]
+    Q_pred = y_pred[..., 1]
+    U_pred = y_pred[..., 2] 
+    V_pred = y_pred[..., 3]
+    
+    # Restricción fundamental: √(Q² + U² + V²) ≤ I
+    pol_intensity = tf.sqrt(Q_pred**2 + U_pred**2 + V_pred**2 + 1e-8)
+    constraint_violation = tf.maximum(0.0, pol_intensity - I_pred)
+    
+    # Penalizar violaciones
+    physics_penalty = tf.reduce_mean(constraint_violation**2)
+    
+    return physics_penalty
+
+def stokes_spatial_smoothness_loss(y_pred):
+    """Pérdida de suavidad espacial para coherencia entre parámetros"""
+    
+    # Gradientes espaciales para cada parámetro
+    gradients_loss = 0.0
+    
+    for i in range(4):  # Para cada parámetro de Stokes
+        channel = y_pred[..., i]
+        
+        # Gradientes horizontales y verticales
+        grad_h = channel[:, :-1, :] - channel[:, 1:, :]
+        grad_v = channel[:, :, :-1] - channel[:, :, 1:]
+        
+        # Penalizar gradientes excesivos
+        gradients_loss += tf.reduce_mean(tf.square(grad_h))
+        gradients_loss += tf.reduce_mean(tf.square(grad_v))
+    
+    return gradients_loss / 4.0  # Normalizar por número de canales
 
 
 # =============================================================================
@@ -155,48 +338,42 @@ class FIPSDataGenerator(keras.utils.Sequence):
 # =============================================================================
 
 def load_fits_image(fits_path):
-    """Cargar imagen FITS con manejo robusto"""
-    print(f"📥 Cargando imagen: {fits_path}")
+    """
+    Cargar cubo de datos de Stokes desde FITS
+    Retorna array con forma [H, W, 4] para [I, Q, U, V]
+    """
+    print(f"📥 Cargando cubo de Stokes: {fits_path}")
     
     with fits.open(fits_path) as hdul:
-        image = hdul[0].data.astype(np.float32)
+        data = hdul[0].data.astype(np.float32)
         header = hdul[0].header
     
-    print(f"🔍 Dimensiones originales: {image.shape}")
+    # Reorganizar dimensiones si es necesario
+    if len(data.shape) == 3 and data.shape[0] == 4:
+        # Formato [4, H, W] -> [H, W, 4]
+        data = np.transpose(data, (1, 2, 0))
+    elif len(data.shape) == 4:
+        # Formato [1, 4, H, W] -> [H, W, 4]
+        data = np.transpose(data[0], (1, 2, 0))
     
-    # Manejar múltiples dimensiones
-    if len(image.shape) == 4:
-        print("   - Detectado 4D: tomando primer frame y canal")
-        image = image[0, 0].copy()
-    elif len(image.shape) == 3:
-        if image.shape[0] <= 4:
-            print(f"   - Detectado 3D con {image.shape[0]} canales: tomando primero")
-            image = image[0].copy()
-        else:
-            print(f"   - Detectado 3D con {image.shape[0]} frames: promediando")
-            image = image.mean(axis=0).copy()
+    print(f"🔍 Cubo de Stokes: {data.shape}")
     
-    print(f"✅ Dimensiones finales: {image.shape}")
+    # Validar que tenemos exactamente 4 parámetros
+    assert data.shape[-1] == 4, f"Se esperan 4 parámetros de Stokes, encontrados {data.shape[-1]}"
     
-    # Normalización
-    print(f"📊 Rango original: [{image.min():.3f}, {image.max():.3f}]")
+    # Normalización preservando relaciones físicas
+    # Normalizar basándose en el parámetro I (intensidad total)
+    I_channel = data[..., 0]
+    p1, p99 = np.percentile(I_channel, [1, 99])
     
-    if image.min() >= 0 and image.max() <= 1:
-        print("   - Imagen ya normalizada [0,1]")
-        norm_params = (0, 1)
-    else:
-        p1, p99 = np.percentile(image, [1, 99])
-        if p99 - p1 == 0:
-            print("⚠️ Imagen constante")
-            return image, header, (0, 1)
-        
-        image = np.clip(image, p1, p99)
-        image = (image - p1) / (p99 - p1)
+    if p99 - p1 > 0:
+        # Normalizar todos los canales con la misma escala
+        data = (data - p1) / (p99 - p1)
         norm_params = (p1, p99)
+    else:
+        norm_params = (0, 1)
     
-    print(f"✅ Rango normalizado: [{image.min():.3f}, {image.max():.3f}]")
-    
-    return image, header, norm_params
+    return data, header, norm_params
 
 
 # =============================================================================
@@ -220,13 +397,13 @@ def train_self2self_tensorflow(image, config):
     # Compilar modelo
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=config['learning_rate']),
-        loss='mse',
+        loss=stokes_combined_loss,
         metrics=['mae']
     )
     
     # Crear generador de datos
-    train_generator = FIPSDataGenerator(
-        image=image,
+    train_generator = StokesDataGenerator(
+        stokes_cube=image,
         patch_size=config['patch_size'],
         batch_size=config['batch_size'],
         patches_per_epoch=2000
@@ -241,7 +418,7 @@ def train_self2self_tensorflow(image, config):
     # Callbacks
     callbacks = [
         keras.callbacks.ReduceLROnPlateau(
-            monitor='loss', factor=0.5, patience=10, min_lr=1e-6, verbose=1
+            monitor='loss', factor=0.5, patience=10, min_lr=1e-6, verbose=1, mode='max'
         ),
         keras.callbacks.EarlyStopping(
             monitor='loss', patience=20, restore_best_weights=True, verbose=1

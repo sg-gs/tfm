@@ -63,10 +63,10 @@ class Self2SelfGenerator(nn.Module):
         self.bottleneck = nn.Sequential(
             nn.Conv2d(192, 192, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 1.5),  # Dropout más intenso
+            nn.Dropout2d(0.3),  # Dropout más intenso
             nn.Conv2d(192, 192, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 1.5)
+            nn.Dropout2d(0.3)
         )
         
         # DECODER
@@ -75,13 +75,13 @@ class Self2SelfGenerator(nn.Module):
         self.dec1 = nn.Sequential(
             nn.Conv2d(192 + 192, 192, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 0.8),
+            nn.Dropout2d(0.3),
             nn.Conv2d(192, 192, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 0.8),
+            nn.Dropout2d(0.3),
             nn.Conv2d(192, 192, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 0.8)
+            nn.Dropout2d(0.3)
         )
         
         # DB2: 16x16 -> 32x32 (192 + 96 -> 96)
@@ -89,13 +89,13 @@ class Self2SelfGenerator(nn.Module):
         self.dec2 = nn.Sequential(
             nn.Conv2d(192 + 96, 96, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob),
+            nn.Dropout2d(0.3),
             nn.Conv2d(96, 96, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob),
+            nn.Dropout2d(0.3),
             nn.Conv2d(96, 96, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob)
+            nn.Dropout2d(0.3)
         )
         
         # DB3: 32x32 -> 64x64 (96 + 48 -> 48)
@@ -103,13 +103,13 @@ class Self2SelfGenerator(nn.Module):
         self.dec3 = nn.Sequential(
             nn.Conv2d(96 + 96, 96, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 1.2),
+            nn.Dropout2d(0.3),
             nn.Conv2d(96, 96, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 1.2),
+            nn.Dropout2d(0.3),
             nn.Conv2d(96, 48, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 1.2)
+            nn.Dropout2d(0.3)
         )
         
         # DB4: 64x64 -> 128x128 (48 + 48 -> 48)
@@ -117,13 +117,13 @@ class Self2SelfGenerator(nn.Module):
         self.dec4 = nn.Sequential(
             nn.Conv2d(48 + 48, 48, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 1.4),
+            nn.Dropout2d(0.3),
             nn.Conv2d(48, 48, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 1.4),
+            nn.Dropout2d(0.3),
             nn.Conv2d(48, 48, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 1.4)
+            nn.Dropout2d(0.3)
         )
         
         # DB5: 128x128 -> 256x256 (48 + 48 -> 64)
@@ -131,13 +131,13 @@ class Self2SelfGenerator(nn.Module):
         self.dec5 = nn.Sequential(
             nn.Conv2d(48 + 48, 64, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 1.6),
+            nn.Dropout2d(0.3),
             nn.Conv2d(64, 64, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 1.6),
+            nn.Dropout2d(0.3),
             nn.Conv2d(64, 32, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob * 0.5)  # Dropout suave al final
+            nn.Dropout2d(0.3)  # Dropout suave al final
         )
         
         self.final = nn.Conv2d(32, 4, 1)

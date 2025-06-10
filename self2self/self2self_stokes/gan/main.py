@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Pix2Pix Denoising MEJORADO - Con evaluación completa como Self2Self
-"""
-
 import traceback
 import torch
 import torch.nn as nn
@@ -17,37 +12,39 @@ from tqdm import tqdm
 import os
 from datetime import datetime
 from generator import Self2SelfGenerator
-from discriminator import SimpleDiscriminator
+from discriminator import Pix2PixDiscriminator
 from logger import Logger 
+from loss import stokes_combined_loss 
 
-# Configuración GPU optimizada
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = Logger("self2self_gan_v1")
-print(f"🔧 Dispositivo: {device}")
+print(f"Device: {device}")
 
 CONFIG = {
     'num_epochs': 150,
     'batch_size': 16,
+    'image_size': 256,
+
     'learning_rate_g': 1e-4,
     'learning_rate_d': 5e-5,
+
     'lambda_l1': 200.0,
     'lambda_adv': 0.5,
-    'lambda_self2self': 100.0,
+    'lambda_stokes': 0.1,
+    'lambda_self2self': 10.0,
     'bernoulli_prob': 0.3,
-    'image_size': 256,
+
     'noise_level': 0.02,
     'num_predictions': 10,
     'save_interval': 15,
 }
 
-print(f"📊 Config: {CONFIG['num_epochs']} épocas, batch={CONFIG['batch_size']}, img={CONFIG['image_size']}")
+print('Self2Self Denoising')
+print(f"Config: epochs={CONFIG['num_epochs']}, batch={CONFIG['batch_size']}, img={CONFIG['image_size']}")
 
-# =============================================================================
-# DATASET MEJORADO PARA EVALUACIÓN
-# =============================================================================
 class Self2SelfDataset(Dataset):    
     def __init__(self, fits_file, num_patches=1000, patch_size=128, bernoulli_prob=0.3):
-        print(f"📥 Cargando {fits_file}...")
+        print(f"Cargando {fits_file}...")
         with fits.open(fits_file) as hdul:
             data = hdul[0].data.astype(np.float32)
             self.header = hdul[0].header
@@ -57,7 +54,7 @@ class Self2SelfDataset(Dataset):
         else:
             raise ValueError(f"Formato inesperado: {data.shape}")
         
-        print(f"✅ Datos cargados: {self.stokes_cube.shape}")
+        print(f"Datos cargados: {self.stokes_cube.shape}")
         
         # Parámetros
         self.num_patches = num_patches
@@ -99,7 +96,6 @@ class Self2SelfDataset(Dataset):
         return patches
     
     def _normalize_patch(self, patch):
-        """Normalización"""
         normalized = patch.copy()
         I = patch[..., 0]
         I_scale = self.I_max - self.I_min
@@ -169,16 +165,10 @@ def self2self_loss_with_mask(generated, target, mask):
     return loss
 
 # =============================================================================
-# FUNCIONES DE EVALUACIÓN
+# EVALUATION
 # =============================================================================
 
 def denoise_full_image(generator, image, config):
-    """Aplicar denoising a imagen completa"""
-    
-    print(f"\n🧠 Aplicando Self2Self denoising...")
-    print(f"   - Imagen: {image.shape}")
-    print(f"   - Predicciones: {config['num_predictions']}")
-    
     generator.eval()
     
     h, w, channels = image.shape
@@ -186,8 +176,6 @@ def denoise_full_image(generator, image, config):
     
     if h <= patch_size and w <= patch_size:
         # Imagen pequeña - procesar completa
-        print("   - Modo: Cubo completo")
-        
         img_input = image.copy()
         
         if h < patch_size or w < patch_size:
@@ -216,15 +204,12 @@ def denoise_full_image(generator, image, config):
         
     else:
         # Imagen grande - procesar por patches
-        print("   - Modo: Por patches")
         result = denoise_by_patches(generator, image, config)
     
     generator.train()
     return result
 
 def denoise_by_patches(generator, image, config):
-    """Denoising por patches para imágenes grandes"""
-    
     h, w, channels = image.shape
     patch_size = config['image_size']
     overlap = 32
@@ -287,7 +272,6 @@ def denoise_by_patches(generator, image, config):
     return final_result
 
 def create_weight_patch(patch_size, overlap):
-    """Crear patch de pesos para blending"""
     weight = np.ones((patch_size, patch_size), dtype=np.float32)
     
     if overlap > 0:
@@ -300,8 +284,6 @@ def create_weight_patch(patch_size, overlap):
     return weight
 
 def desnormalize_stokes(stokes_normalized, I_min, I_max):
-    """Desnormalizar cubo de Stokes"""
-    
     stokes_original = stokes_normalized.copy()
     I_scale = I_max - I_min
     
@@ -314,8 +296,6 @@ def desnormalize_stokes(stokes_normalized, I_min, I_max):
     return stokes_original
 
 def validate_stokes_physics_post_denoising(stokes_cube):
-    """Validar física de Stokes post-denoising"""
-    
     I = stokes_cube[..., 0]
     Q = stokes_cube[..., 1]
     U = stokes_cube[..., 2]
@@ -327,7 +307,7 @@ def validate_stokes_physics_post_denoising(stokes_cube):
     
     compliance_rate = 1.0 - (violations / total_pixels)
     
-    print(f"\n🔬 Validación física post-denoising:")
+    print(f"\nValidación física post-denoising:")
     print(f"   - Violaciones: {violations}/{total_pixels}")
     print(f"   - Cumplimiento: {compliance_rate:.4f} ({compliance_rate*100:.2f}%)")
     print(f"   - I rango: [{I.min():.4f}, {I.max():.4f}]")
@@ -337,36 +317,7 @@ def validate_stokes_physics_post_denoising(stokes_cube):
     
     return compliance_rate > 0.95
 
-def create_comparison(original, denoised, save_path='pix2pix_stokes_comparison.png'):
-    """Crear comparación visual como Self2Self"""
-    
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-    stokes_labels = ['I (Intensidad)', 'Q (Pol. Linear)', 'U (Pol. Linear)', 'V (Pol. Circular)']
-   
-    for i in range(4):
-        # Original
-        im1 = axes[0, i].imshow(original[..., i], cmap='hot' if i==0 else 'coolwarm', 
-                                origin='lower')
-        axes[0, i].set_title(f'Original {stokes_labels[i]}', fontweight='bold')
-        axes[0, i].axis('off')
-        plt.colorbar(im1, ax=axes[0, i], fraction=0.046)
-        
-        # Denoised
-        im2 = axes[1, i].imshow(denoised[..., i], cmap='hot' if i==0 else 'coolwarm', 
-                                origin='lower')
-        axes[1, i].set_title(f'Pix2Pix {stokes_labels[i]}', fontweight='bold')
-        axes[1, i].axis('off')
-        plt.colorbar(im2, ax=axes[1, i], fraction=0.046)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.show()
-    
-    print(f"📊 Comparación Stokes guardada: {save_path}")
-
 def print_stokes_statistics(original, denoised):
-    """Estadísticas específicas para Stokes"""
-    
     print("\n📈 ESTADÍSTICAS FINALES STOKES:")
     print("=" * 40)
     
@@ -385,9 +336,6 @@ def print_stokes_statistics(original, denoised):
         else:
             print(f"✅ {name}: reducción ruido = {noise_reduction:.1%}, MSE = {mse:.6f}")
 
-# =============================================================================
-# ENTRENAMIENTO
-# =============================================================================
 def train(fits_file):
     dataset = Self2SelfDataset(fits_file, num_patches=1000, patch_size=128)
     dataloader = DataLoader(
@@ -399,10 +347,10 @@ def train(fits_file):
     )
 
     generator = Self2SelfGenerator().to(device)
-    discriminator = SimpleDiscriminator().to(device)
+    discriminator = Pix2PixDiscriminator(ndf=32).to(device)
 
-    print(f"🏗️ Generador: {sum(p.numel() for p in generator.parameters()):,} parámetros")
-    print(f"🏗️ Discriminador: {sum(p.numel() for p in discriminator.parameters()):,} parámetros")
+    print(f"> Generador: {sum(p.numel() for p in generator.parameters()):,} parámetros")
+    print(f"> Discriminador: {sum(p.numel() for p in discriminator.parameters()):,} parámetros")
 
     opt_g = optim.Adam(generator.parameters(), lr=CONFIG['learning_rate_g'])
     opt_d = optim.Adam(discriminator.parameters(), lr=CONFIG['learning_rate_d'])
@@ -432,10 +380,9 @@ def train(fits_file):
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     print(f"\n{'='*60}")
-    print(f"🏋️ ENTRENAMIENTO Self2Self en GAN")
+    print(f"TRAINING")
     print(f"{'='*60}")
     
-    # Variables para tracking
     train_losses = []
     
     for epoch in range(CONFIG['num_epochs']):
@@ -449,6 +396,7 @@ def train(fits_file):
         epoch_self2self_loss = 0
         epoch_adv_loss = 0
         epoch_l1_loss = 0
+        epoch_stokes_loss = 0
         
         pbar = tqdm(dataloader, desc=f"Época {epoch+1:03d}/{CONFIG['num_epochs']:03d}")
         
@@ -498,12 +446,16 @@ def train(fits_file):
                 
                 # Pérdida L1 (consistencia global)
                 g_l1_loss = criterion_l1(generated_output, target_original)
+
+                # Perdida de stokes
+                stokes_loss = stokes_combined_loss(target_original, generated_output)
                 
-                # COMBINAR: Self2Self + Adversarial + L1
+                # COMBINAR: Self2Self + Adversarial + L1 + Stokes
                 g_loss = (
                     CONFIG['lambda_self2self'] * self2self_loss +
                     CONFIG['lambda_adv'] * g_adv_loss +
-                    CONFIG['lambda_l1'] * g_l1_loss
+                    CONFIG['lambda_l1'] * g_l1_loss +
+                    CONFIG['lambda_stokes'] * stokes_loss
                 )
         
                 g_loss.backward()
@@ -515,6 +467,7 @@ def train(fits_file):
                 epoch_self2self_loss += self2self_loss.item()
                 epoch_adv_loss += g_adv_loss.item()
                 epoch_l1_loss += g_l1_loss.item()
+                epoch_stokes_loss += stokes_loss.item() 
                 
                 # Actualizar progress bar (como en Pix2Pix)
                 pbar.set_postfix({
@@ -535,6 +488,7 @@ def train(fits_file):
         avg_self2self_loss = epoch_self2self_loss / len(dataloader)
         avg_adv_loss = epoch_adv_loss / len(dataloader)
         avg_l1_loss = epoch_l1_loss / len(dataloader)
+        avg_stokes_loss = epoch_stokes_loss / len(dataloader)
         epoch_time = time.time() - epoch_start
         
         # Guardar estadísticas
@@ -544,7 +498,8 @@ def train(fits_file):
             'd_loss': avg_d_loss,
             'self2self_loss': avg_self2self_loss,
             'adv_loss': avg_adv_loss,
-            'l1_loss': avg_l1_loss
+            'l1_loss': avg_l1_loss,
+            'stokes_loss': avg_stokes_loss
         })
 
         logger.log_epoch(
@@ -561,6 +516,7 @@ def train(fits_file):
         print(f"   🔸 Self2Self: {avg_self2self_loss:.6f}")
         print(f"   🔸 Adversarial: {avg_adv_loss:.6f}")
         print(f"   🔸 L1: {avg_l1_loss:.6f}")
+        print(f"   🔸 Stokes: {avg_stokes_loss:.6f}")
         
         # Actualizar schedulers
         scheduler_g.step(avg_g_loss)
@@ -572,9 +528,9 @@ def train(fits_file):
                 save_self2self_training_example(
                     generator, dataloader, checkpoint_dir, epoch + 1
                 )
-                print(f"   📸 Ejemplo guardado")
+                print(f"   Ejemplo guardado")
             except Exception as e:
-                print(f"   ⚠️ Error guardando ejemplo: {e}")
+                print(f"   Error guardando ejemplo: {e}")
         
         # Checkpoint
         if (epoch + 1) % CONFIG['save_interval'] == 0:
@@ -588,15 +544,10 @@ def train(fits_file):
             }, os.path.join(checkpoint_dir, f'model_epoch_{epoch+1:03d}.pth'))
             print(f"   💾 Checkpoint guardado")
     
-    print(f"\n🎉 Entrenamiento completado!")
-    print(f"📁 Checkpoints en: {checkpoint_dir}")
-    
-    # =================================================================
-    # EVALUACIÓN COMPLETA
-    # =================================================================
+    print(f"\nTraining completed. Checkpoints located at: {checkpoint_dir}")
     
     print(f"\n{'='*60}")
-    print(f"🧠 EVALUACIÓN COMPLETA")
+    print(f"EVALUATION")
     print(f"{'='*60}")
     
     # Obtener datos originales para evaluación (como en Pix2Pix)
@@ -607,51 +558,35 @@ def train(fits_file):
     # Normalizar imagen completa
     original_normalized = dataset._normalize_patch(original_cube)
     
-    # Aplicar denoising Self2Self con ensemble
+    # Denoise
     denoised_normalized = denoise_full_image_self2self(
         generator, original_normalized, CONFIG
     )
     
-    # Desnormalizar resultados
+    # Denorm results
     original_final = desnormalize_stokes(original_normalized, I_min, I_max)
     denoised_final = desnormalize_stokes(denoised_normalized, I_min, I_max)
 
     logger.log_evaluation(CONFIG['num_epochs'], original_final, denoised_final)
     
-    # Validación física
+    # Validate physics
     physics_ok = validate_stokes_physics_post_denoising(denoised_final)
     if not physics_ok:
         print("⚠️ Advertencia: Problemas de cumplimiento físico detectados")
     
-    # Guardar resultado en FITS
-    # print("\n💾 Guardando resultado...")
-    # denoised_fits_format = np.transpose(denoised_final, (2, 0, 1))
-    
-    # hdu = fits.PrimaryHDU(denoised_fits_format.astype(np.float32))
-    # if header:
-    #     hdu.header.update(header)
-    # hdu.writeto('self2self_gan_denoised.fits', overwrite=True)
-    # print("✅ Resultado guardado: self2self_gan_denoised.fits")
-    
-    # Crear visualización
-    # print("\n📊 Creando visualización...")
-    # create_comparison_self2self(original_final, denoised_final)
-    
-    # Estadísticas finales
     print_stokes_statistics(original_final, denoised_final)
     
-    # Estadísticas adicionales del entrenamiento
-    print("\n📈 RESULTADOS ADICIONALES:")
+    print("\nOTHER STATS:")
     print("=" * 30)
     
     final_losses = train_losses[-1]
-    print(f"✅ G_Loss final: {final_losses['g_loss']:.6f}")
-    print(f"✅ D_Loss final: {final_losses['d_loss']:.6f}")
-    print(f"✅ Self2Self final: {final_losses['self2self_loss']:.6f}")
-    print(f"✅ Adversarial final: {final_losses['adv_loss']:.6f}")
-    print(f"✅ L1 final: {final_losses['l1_loss']:.6f}")
+    print(f"G_Loss final: {final_losses['g_loss']:.6f}")
+    print(f"D_Loss final: {final_losses['d_loss']:.6f}")
+    print(f"Self2Self final: {final_losses['self2self_loss']:.6f}")
+    print(f"Adversarial final: {final_losses['adv_loss']:.6f}")
+    print(f"L1 final: {final_losses['l1_loss']:.6f}")
     
-    # Métricas de convergencia
+    # convergence stats
     if len(train_losses) > 10:
         recent_g_losses = [l['g_loss'] for l in train_losses[-10:]]
         g_loss_std = np.std(recent_g_losses)
@@ -721,12 +656,6 @@ def save_self2self_training_example(generator, dataloader, save_dir, epoch):
     generator.train()
 
 def denoise_full_image_self2self(generator, image, config):
-    """Aplicar denoising Self2Self con ensemble"""
-    
-    print(f"\n🧠 Aplicando Self2Self-GAN denoising...")
-    print(f"   - Imagen: {image.shape}")
-    print(f"   - Predicciones ensemble: {config['num_predictions']}")
-    
     generator.eval()
     
     # Mantener dropout activo para variabilidad (Self2Self)
@@ -739,7 +668,6 @@ def denoise_full_image_self2self(generator, image, config):
     
     if h <= patch_size and w <= patch_size:
         # Imagen pequeña - procesar completa
-        print("   - Modo: Cubo completo")
         
         img_input = image.copy()
         
@@ -766,15 +694,11 @@ def denoise_full_image_self2self(generator, image, config):
         
     else:
         # Imagen grande - por patches (usar tu función existente)
-        print("   - Modo: Por patches")
         result = denoise_by_patches(generator, image, config)
     
     return result
 
-# Función de comparación visual (adaptada)
 def create_comparison_self2self(original, denoised, save_path='self2self_gan_comparison.png'):
-    """Crear comparación específica para Self2Self-GAN"""
-    
     fig, axes = plt.subplots(2, 4, figsize=(20, 10))
     stokes_labels = ['I (Intensidad)', 'Q (Pol. Linear)', 'U (Pol. Linear)', 'V (Pol. Circular)']
    
@@ -789,7 +713,7 @@ def create_comparison_self2self(original, denoised, save_path='self2self_gan_com
         # Denoised
         im2 = axes[1, i].imshow(denoised[..., i], cmap='hot' if i==0 else 'coolwarm', 
                                 origin='lower')
-        axes[1, i].set_title(f'Self2Self-GAN {stokes_labels[i]}', fontweight='bold')
+        axes[1, i].set_title(f'Self2Self {stokes_labels[i]}', fontweight='bold')
         axes[1, i].axis('off')
         plt.colorbar(im2, ax=axes[1, i], fraction=0.046)
     
@@ -797,15 +721,15 @@ def create_comparison_self2self(original, denoised, save_path='self2self_gan_com
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.show()
     
-    print(f"📊 Comparación guardada: {save_path}")
+    print(f"Comparación guardada: {save_path}")
 
 
 def main():
     fits_file = '../data.fits'
     
     if not os.path.exists(fits_file):
-        print(f"No se encuentra {fits_file}")
-        print("📝 Modifica la variable 'fits_file' para apuntar a tus datos FITS")
+        print(f"Cannot find {fits_file}")
+        print("Check 'fits_file' variable value")
         return
 
     learning_rates_g = [5e-5, 1e-4, 2e-4]
@@ -817,10 +741,10 @@ def main():
     
     try:
         if device.type == 'cuda':
-            print(f"GPU detectada: {torch.cuda.get_device_name()}")
-            print(f"   - Memoria disponible: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+            print(f"GPU detected: {torch.cuda.get_device_name()}")
+            print(f"   - Availablte memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
         else:
-            print("⚠️ Usando CPU - considera usar GPU para mejor rendimiento")
+            print("WARNING ! Using CPU - consider using GPU for speeding up the training")
 
         for lr_g in learning_rates_g:
             for lr_d in learning_rates_d:
@@ -839,7 +763,6 @@ def main():
 
                         suffix = f"_exp{exp_count}_lrg{lr_g:.0e}_lrd{lr_d:.0e}_ep{epochs}"
                         
-                        # Guardar FITS con nombre único
                         fits_name = f'self2self_gan_denoised{suffix}.fits'
                         denoised_fits_format = np.transpose(denoised, (2, 0, 1))
                         hdu = fits.PrimaryHDU(denoised_fits_format.astype(np.float32))
@@ -848,13 +771,13 @@ def main():
                         comparison_name = f'self2self_gan_comparison{suffix}.png'
                         create_comparison_self2self(original, denoised, comparison_name)
 
-                        print(f"Entrenamiento {exp_count}/{total_experiments} completado en {training_time:.1f} min")
+                        print(f"Training {exp_count}/{total_experiments} completed in {training_time:.1f} min")
 
                     except Exception as e:
                         print(f"Error: {e}")
                         traceback.print_exc()
         
-        print("Entrenamiento finalizado")
+        print("Training completed.")
         
         return generator, discriminator, original, denoised
         
