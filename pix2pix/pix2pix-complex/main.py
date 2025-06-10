@@ -20,28 +20,20 @@ logger = Logger("pix2pix_gan_v1")
 print(f"Device: {device}")
 
 CONFIG = {
-    # APROVECHAR TU A10 AL MÁXIMO
     'num_epochs': 150,          # Más épocas
     'batch_size': 16,           # DUPLICAR (tienes 23.7GB!)
     'image_size': 256,          # Mantener
     
-    # REBALANCEAR LEARNING RATES
     'learning_rate_g': 1e-4,    # REDUCIR de 2e-4
     'learning_rate_d': 5e-5,    # MUY BAJO para discriminador
     
-    # REAJUSTAR PÉRDIDAS
     'lambda_l1': 200.0,         # AUMENTAR de 50 → 200
     'lambda_adv': 0.5,          # REDUCIR peso adversarial
     'lambda_stokes': 0.1,
     
-    # DATOS MEJORADOS
     'noise_level': 0.02,        # REDUCIR de 0.03
     'num_predictions': 10,
     'save_interval': 15,
-    
-    # NUEVOS PARÁMETROS
-    'gradient_penalty': 0.1,    # Regularización discriminador
-    'spectral_norm': True,      # Estabilizar discriminador
 }
 
 print(f"Pix2Pix Denoising")
@@ -483,6 +475,7 @@ def train(fits_file):
                 g_l1_loss = criterion_l1(fake_clean, clean_batch)
                 stokes_loss = stokes_combined_loss(clean_batch, fake_clean)
 
+                # stokes + l1 + adversarial
                 g_loss = (
                     CONFIG['lambda_adv'] * g_adv_loss + 
                     CONFIG['lambda_l1'] * g_l1_loss + 

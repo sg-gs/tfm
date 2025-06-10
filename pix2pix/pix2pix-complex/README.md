@@ -1,6 +1,6 @@
 # Pix2Pix
 
-Based on the original paper by Isola (2018) et al and modified for solar denoising by: 
+Based on the paper by Isola (2018) et al and modified for solar denoising
 
 ## Generator
 
@@ -40,7 +40,7 @@ The generator enforces physical constraints on Stokes parameters:
 
 ## Discriminator
 
-The discriminator implements a **PatchGAN** architecture that classifies whether each N×N patch in the image pair is real or fake, rather than classifying the entire image.
+The discriminator implements a **PatchGAN** architecture that classifies whether each NxN patch in the image pair is real or fake, rather than classifying the entire image.
 
 ### Architecture
 
