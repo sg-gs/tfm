@@ -377,7 +377,7 @@ def train(fits_file):
         shuffle=True,
         num_workers=num_workers if device.type == 'cuda' else 0,
         pin_memory=True if device.type == 'cuda' else False,
-        persistent_workers=True,
+        persistent_workers=False,
         prefetch_factor=2,
     )
     
@@ -387,7 +387,7 @@ def train(fits_file):
         shuffle=False,
         num_workers=num_workers if device.type == 'cuda' else 0,
         pin_memory=True if device.type == 'cuda' else False,
-        persistent_workers=True,
+        persistent_workers=False,
         prefetch_factor=2,
     )
     
