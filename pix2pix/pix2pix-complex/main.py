@@ -10,6 +10,9 @@ import time
 from tqdm import tqdm
 import os
 from datetime import datetime
+import sys
+
+sys.path.append('..')
 from discriminator import Pix2PixDiscriminator
 from generator import Pix2PixGenerator
 from logger import Logger
@@ -32,7 +35,6 @@ CONFIG = {
     'lambda_stokes': 0.1,
     
     'noise_level': 0.02,        # REDUCIR de 0.03
-    'num_predictions': 10,
     'save_interval': 15,
 }
 
@@ -160,12 +162,16 @@ class DenoisingDataset(Dataset):
 
 def denoise_full_image(generator, image, config):
     generator.eval()
-    
+
+    # Mantener dropout activo durante inferencia (Pix2Pix)
+    for module in generator.modules():
+        if isinstance(module, nn.Dropout):
+            module.train()
+
     h, w, channels = image.shape
     patch_size = config['image_size']
     
     if h <= patch_size and w <= patch_size:
-        # Imagen pequeña - procesar completa
         img_input = image.copy()
         
         if h < patch_size or w < patch_size:
@@ -180,15 +186,10 @@ def denoise_full_image(generator, image, config):
         # Convertir a tensor
         img_tensor = torch.from_numpy(img_input).permute(2, 0, 1).unsqueeze(0).float().to(device)
         
-        # Múltiples predicciones (simulando dropout usando diferentes seeds)
-        predictions = []
-        for i in range(config['num_predictions']):
-            with torch.no_grad():
-                pred = generator(img_tensor)
-                predictions.append(pred.cpu().numpy().squeeze())
-        
-        # Promediar predicciones
-        result = np.mean(predictions, axis=0)
+        with torch.no_grad():
+            pred = generator(img_tensor)
+            result = pred.cpu().numpy().squeeze()
+
         result = np.transpose(result, (1, 2, 0))  # (C, H, W) -> (H, W, C)
         result = result[:h, :w, :]
         
@@ -199,8 +200,6 @@ def denoise_full_image(generator, image, config):
     generator.train()
     return result
 
-# we take the approach of applying the denoising per patches for bigger images, in order 
-# to try to reduce the noise
 def denoise_by_patches(generator, image, config):
     h, w, channels = image.shape
     patch_size = config['image_size']
@@ -229,14 +228,10 @@ def denoise_by_patches(generator, image, config):
             patch = image[y:y+patch_size, x:x+patch_size, :].copy()
             patch_tensor = torch.from_numpy(patch).permute(2, 0, 1).unsqueeze(0).float().to(device)
             
-            # Múltiples predicciones
-            patch_predictions = []
-            for i in range(config['num_predictions']):
-                with torch.no_grad():
-                    pred = generator(patch_tensor)
-                    patch_predictions.append(pred.cpu().numpy().squeeze())
-            
-            denoised_patch = np.mean(patch_predictions, axis=0)
+            with torch.no_grad():
+                pred = generator(patch_tensor)
+                denoised_patch = pred.cpu().numpy().squeeze()
+
             denoised_patch = np.transpose(denoised_patch, (1, 2, 0))
             
             # Peso para blending
@@ -363,6 +358,8 @@ def train(fits_file):
         image_size=CONFIG['image_size'],
         noise_level=CONFIG['noise_level']
     )
+
+    num_workers = max(2, os.cpu_count())
     
     val_dataset = DenoisingDataset(
         fits_file,
@@ -378,16 +375,20 @@ def train(fits_file):
         train_dataset, 
         batch_size=CONFIG['batch_size'], 
         shuffle=True,
-        num_workers=2 if device.type == 'cuda' else 0,
-        pin_memory=True if device.type == 'cuda' else False
+        num_workers=num_workers if device.type == 'cuda' else 0,
+        pin_memory=True if device.type == 'cuda' else False,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
     
     val_loader = DataLoader(
         val_dataset, 
         batch_size=CONFIG['batch_size'], 
         shuffle=False,
-        num_workers=2 if device.type == 'cuda' else 0,
-        pin_memory=True if device.type == 'cuda' else False
+        num_workers=num_workers if device.type == 'cuda' else 0,
+        pin_memory=True if device.type == 'cuda' else False,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
     
     print(f"📊 Train: {len(train_loader)} batches, Val: {len(val_loader)} batches")
@@ -648,7 +649,7 @@ def main():
     
     learning_rates_g = [5e-5, 1e-4, 2e-4]
     learning_rates_d = [2e-5, 5e-5, 1e-4]
-    epochs_list = [100, 150, 200]  
+    epochs_list = [50, 100, 150]  
 
     exp_count = 0
     total_experiments = len(learning_rates_g) * len(learning_rates_d) * len(epochs_list)
@@ -657,6 +658,9 @@ def main():
         if device.type == 'cuda':
             print(f"GPU detected: {torch.cuda.get_device_name()}")
             print(f"   - Availablte memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         else:
             print("WARNING ! Using CPU - consider using GPU for speeding up the training")
         
